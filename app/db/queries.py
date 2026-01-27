@@ -734,9 +734,11 @@ SELECT_APROBACIONES_PENDIENTES = """
     SELECT 
         a.id_aprobacion, a.id_solicitud, a.nivel, a.codigo_trabajador_aprueba,
         a.estado, a.observacion, a.fecha, a.usuario, a.ip_dispositivo, a.fecha_notificado,
-        s.tipo_solicitud, s.codigo_trabajador, s.fecha_inicio, s.fecha_fin, s.dias_solicitados
+        s.tipo_solicitud, s.codigo_trabajador, s.fecha_inicio, s.fecha_fin, s.dias_solicitados,
+        LTRIM(RTRIM(ISNULL(t.dtraba, ''))) AS nombre_trabajador
     FROM ppavac_aprobacion a
     INNER JOIN ppavac_solicitud s ON a.id_solicitud = s.id_solicitud
+    LEFT JOIN dbo.vw_mtraba10 t ON t.ctraba COLLATE DATABASE_DEFAULT = s.codigo_trabajador COLLATE DATABASE_DEFAULT
     WHERE a.codigo_trabajador_aprueba = ?
       AND a.estado = 'P'
       AND s.estado = 'P'
