@@ -3,7 +3,7 @@
 Endpoints para gestión de notificaciones push.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Optional
 import logging
 
@@ -74,4 +74,74 @@ async def registrar_token_dispositivo(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error al registrar token del dispositivo"
+        )
+
+
+@router.post(
+    "/test-envio",
+    summary="Probar envío de notificación",
+    description="Endpoint de prueba para verificar que el envío de notificaciones funciona"
+)
+async def test_envio_notificacion(
+    token_fcm: str = Query(..., description="Token FCM a probar"),
+    current_user: UsuarioReadWithRoles = Depends(get_current_active_user)
+):
+    """
+    Endpoint de prueba para verificar que el envío de notificaciones funciona.
+    Usar con el token_fcm del aprobador desde la base de datos.
+    """
+    try:
+        from firebase_admin import messaging
+        
+        # Verificar que Firebase esté disponible
+        try:
+            import firebase_admin
+            from firebase_admin import messaging
+        except ImportError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Firebase Admin SDK no está disponible. Instale firebase-admin."
+            )
+        
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title="Prueba de Notificación",
+                body="Esta es una notificación de prueba desde el backend"
+            ),
+            data={
+                "tipo_solicitud": "V",
+                "id_solicitud": "999",
+                "tipo": "test"
+            },
+            token=token_fcm,
+            android=messaging.AndroidConfig(
+                priority='high',
+                notification=messaging.AndroidNotification(
+                    channel_id='fidesoft_channel',
+                    sound='default'
+                )
+            ),
+            apns=messaging.APNSConfig(
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(
+                        sound='default',
+                        badge=1
+                    )
+                )
+            )
+        )
+        
+        response = messaging.send(message)
+        logger.info(f"Notificación de prueba enviada exitosamente: {response}")
+        
+        return {
+            "success": True,
+            "message": "Notificación enviada exitosamente",
+            "message_id": response
+        }
+    except Exception as e:
+        logger.exception(f"Error en prueba de notificación: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al enviar notificación de prueba: {str(e)}"
         )

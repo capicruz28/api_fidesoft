@@ -239,6 +239,8 @@ class VacacionesPermisosService(BaseService):
             
             # 5. Enviar notificación push a aprobadores (en background, no bloquea)
             try:
+                logger.info(f"Iniciando envío de notificación push para solicitud {id_solicitud}")
+                
                 # Obtener información del trabajador para la notificación
                 trabajador = execute_query(
                     SELECT_TRABAJADOR_BY_CODIGO,
@@ -250,20 +252,34 @@ class VacacionesPermisosService(BaseService):
                 codigo_area = None
                 if trabajador and trabajador[0].get('codigo_area'):
                     codigo_area = trabajador[0]['codigo_area']
+                    logger.info(f"Área del trabajador {solicitud_data.codigo_trabajador}: {codigo_area}")
+                else:
+                    logger.warning(f"No se pudo obtener área para trabajador {solicitud_data.codigo_trabajador}")
                 
-                # Enviar notificación si hay área
-                if codigo_area:
-                    from app.services.notificaciones_service import NotificacionesService
-                    await NotificacionesService.enviar_notificacion_nueva_solicitud(
-                        id_solicitud=id_solicitud,
-                        tipo_solicitud=solicitud_data.tipo_solicitud,
-                        codigo_trabajador=solicitud_data.codigo_trabajador,
-                        nombre_trabajador=nombre_trabajador,
-                        codigo_area=codigo_area
+                # Enviar notificación
+                from app.services.notificaciones_service import NotificacionesService
+                resultado_notif = await NotificacionesService.enviar_notificacion_nueva_solicitud(
+                    id_solicitud=id_solicitud,
+                    tipo_solicitud=solicitud_data.tipo_solicitud,
+                    codigo_trabajador=solicitud_data.codigo_trabajador,
+                    nombre_trabajador=nombre_trabajador,
+                    codigo_area=codigo_area
+                )
+                
+                if resultado_notif.get('enviado'):
+                    logger.info(
+                        f"✅ Notificación push enviada exitosamente para solicitud {id_solicitud}: "
+                        f"{resultado_notif.get('success_count', 0)} dispositivos notificados"
                     )
+                else:
+                    logger.warning(
+                        f"⚠️ No se pudo enviar notificación push para solicitud {id_solicitud}: "
+                        f"{resultado_notif.get('mensaje', 'Error desconocido')}"
+                    )
+                    
             except Exception as notif_error:
                 # No fallar la creación de solicitud si falla la notificación
-                logger.warning(f"Error enviando notificación push (no crítico): {str(notif_error)}")
+                logger.exception(f"❌ Error crítico enviando notificación push (no crítico para creación): {str(notif_error)}")
             
             # 6. Obtener solicitud completa
             solicitud = await VacacionesPermisosService.obtener_solicitud(id_solicitud)

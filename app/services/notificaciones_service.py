@@ -11,7 +11,8 @@ from app.db.queries import (
     UPDATE_DISPOSITIVO_TOKEN,
     SELECT_TOKENS_APROBADORES,
     SELECT_TOKENS_BY_CODIGOS_TRABAJADORES,
-    SELECT_AREA_TRABAJADOR
+    SELECT_AREA_TRABAJADOR,
+    SELECT_APROBADORES_POR_TRABAJADOR
 )
 from app.db.queries import execute_query, execute_insert, execute_update
 from app.core.exceptions import ServiceError
@@ -175,11 +176,62 @@ class NotificacionesService(BaseService):
             )
             
             tokens = [row['token_fcm'] for row in resultado if row.get('token_fcm')]
-            logger.info(f"Se encontraron {len(tokens)} tokens para aprobadores del área {codigo_area}")
+            logger.info(
+                f"Se encontraron {len(tokens)} tokens para aprobadores del área {codigo_area}. "
+                f"Total aprobadores encontrados: {len(resultado)}"
+            )
+            
+            if resultado and len(tokens) == 0:
+                logger.warning(
+                    f"Se encontraron {len(resultado)} aprobadores pero ninguno tiene token FCM válido. "
+                    f"Códigos: {[r.get('codigo_trabajador') for r in resultado]}"
+                )
+            
             return tokens
             
         except Exception as e:
             logger.exception(f"Error obteniendo tokens de aprobadores: {str(e)}")
+            return []
+    
+    @staticmethod
+    def obtener_tokens_aprobadores_por_trabajador(codigo_trabajador: str) -> List[str]:
+        """
+        Obtiene los tokens FCM de los aprobadores según la jerarquía del trabajador solicitante.
+        Este método es más preciso que obtener_tokens_aprobadores porque considera área, sección y cargo.
+        
+        Args:
+            codigo_trabajador: Código del trabajador que creó la solicitud
+            
+        Returns:
+            Lista de tokens FCM de los aprobadores
+        """
+        try:
+            # Primero obtener los aprobadores según la jerarquía del trabajador
+            aprobadores = execute_query(
+                SELECT_APROBADORES_POR_TRABAJADOR,
+                (codigo_trabajador,)
+            )
+            
+            if not aprobadores:
+                logger.warning(f"No se encontraron aprobadores para el trabajador {codigo_trabajador}")
+                return []
+            
+            codigos_aprobadores = [apr['codigo_trabajador_aprobador'] for apr in aprobadores]
+            logger.info(
+                f"Se encontraron {len(codigos_aprobadores)} aprobadores para trabajador {codigo_trabajador}: {codigos_aprobadores}"
+            )
+            
+            # Obtener tokens de esos aprobadores
+            tokens = NotificacionesService.obtener_tokens_por_codigos(codigos_aprobadores)
+            
+            logger.info(
+                f"Se obtuvieron {len(tokens)} tokens FCM de {len(codigos_aprobadores)} aprobadores para trabajador {codigo_trabajador}"
+            )
+            
+            return tokens
+            
+        except Exception as e:
+            logger.exception(f"Error obteniendo tokens de aprobadores por trabajador: {str(e)}")
             return []
 
     @staticmethod
@@ -295,12 +347,16 @@ class NotificacionesService(BaseService):
                     if not resp.success:
                         if resp.exception:
                             error_code = resp.exception.code
+                            error_message = str(resp.exception)
+                            logger.warning(
+                                f"Error enviando notificación a token {idx}: {error_code} - {error_message}"
+                            )
                             # Códigos que indican token inválido
                             if error_code in ['INVALID_ARGUMENT', 'UNREGISTERED', 'NOT_FOUND']:
                                 invalid_tokens.append(tokens[idx])
                 
                 if invalid_tokens:
-                    logger.warning(f"Se encontraron {len(invalid_tokens)} tokens inválidos")
+                    logger.warning(f"Se encontraron {len(invalid_tokens)} tokens inválidos que deberían marcarse como inactivos")
                     # TODO: Marcar tokens como inactivos en la BD
             
             return {
@@ -358,17 +414,28 @@ class NotificacionesService(BaseService):
                         'failure_count': 0
                     }
             
-            # Obtener tokens de aprobadores del área
-            tokens = NotificacionesService.obtener_tokens_aprobadores(codigo_area)
+            # Obtener tokens de aprobadores según la jerarquía del trabajador
+            # Usar método más preciso que considera área, sección y cargo
+            tokens = NotificacionesService.obtener_tokens_aprobadores_por_trabajador(codigo_trabajador)
+            
+            # Si no hay tokens con el método preciso, intentar con el método por área
+            if not tokens:
+                logger.info(f"No se encontraron tokens con método preciso, intentando por área {codigo_area}")
+                tokens = NotificacionesService.obtener_tokens_aprobadores(codigo_area)
             
             if not tokens:
-                logger.info(f"No hay tokens de aprobadores para el área {codigo_area}")
+                logger.warning(
+                    f"No hay tokens de aprobadores para trabajador {codigo_trabajador} (área: {codigo_area}). "
+                    f"Verificar que existan aprobadores en ppavac_jerarquia y tokens en ppavac_dispositivo."
+                )
                 return {
                     'enviado': False,
                     'mensaje': 'No hay aprobadores con tokens registrados',
                     'success_count': 0,
                     'failure_count': 0
                 }
+            
+            logger.info(f"Se enviarán notificaciones a {len(tokens)} dispositivos para solicitud {id_solicitud}")
             
             # Preparar mensaje
             tipo_texto = 'vacaciones' if tipo_solicitud == 'V' else 'permiso'
@@ -384,6 +451,11 @@ class NotificacionesService(BaseService):
             }
             
             # Enviar notificación
+            logger.info(
+                f"Enviando notificación push para solicitud {id_solicitud}: "
+                f"tipo={tipo_solicitud}, trabajador={codigo_trabajador}, tokens={len(tokens)}"
+            )
+            
             resultado = NotificacionesService.enviar_notificacion_multicast(
                 tokens=tokens,
                 titulo=titulo,
@@ -391,9 +463,16 @@ class NotificacionesService(BaseService):
                 data=data
             )
             
-            logger.info(
-                f"Notificación de nueva solicitud {id_solicitud} enviada a {resultado.get('success_count', 0)} dispositivos"
-            )
+            if resultado.get('enviado'):
+                logger.info(
+                    f"✅ Notificación de nueva solicitud {id_solicitud} enviada exitosamente: "
+                    f"{resultado.get('success_count', 0)}/{len(tokens)} dispositivos"
+                )
+            else:
+                logger.error(
+                    f"❌ Error enviando notificación para solicitud {id_solicitud}: "
+                    f"{resultado.get('mensaje', 'Error desconocido')}"
+                )
             
             return resultado
             

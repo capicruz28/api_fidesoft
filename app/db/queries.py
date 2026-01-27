@@ -1428,14 +1428,30 @@ UPDATE_DISPOSITIVO_TOKEN = """
 """
 
 SELECT_TOKENS_APROBADORES = """
-    SELECT DISTINCT d.token_fcm, d.codigo_trabajador
+    SELECT DISTINCT d.token_fcm, d.codigo_trabajador, j.nivel_jerarquico
     FROM ppavac_dispositivo d
     INNER JOIN ppavac_jerarquia j ON d.codigo_trabajador COLLATE DATABASE_DEFAULT = j.codigo_trabajador_aprobador COLLATE DATABASE_DEFAULT
     WHERE j.codigo_area = ?
       AND j.activo = 'S'
       AND (j.fecha_hasta IS NULL OR j.fecha_hasta >= GETDATE())
       AND d.activo = 'S'
-      AND d.notif_nuevas = 'S'
+      AND (d.notif_nuevas = 'S' OR d.notif_nuevas IS NULL)
+      AND d.token_fcm IS NOT NULL
+      AND d.token_fcm != ''
+    ORDER BY j.nivel_jerarquico ASC;
+"""
+
+SELECT_APROBADORES_POR_TRABAJADOR = """
+    SELECT DISTINCT 
+        j.codigo_trabajador_aprobador,
+        j.nivel_jerarquico
+    FROM ppavac_jerarquia j
+    INNER JOIN dbo.vw_mtraba10 t ON t.careas COLLATE DATABASE_DEFAULT = j.codigo_area COLLATE DATABASE_DEFAULT
+    WHERE t.ctraba = ?
+      AND j.activo = 'S'
+      AND (j.fecha_hasta IS NULL OR j.fecha_hasta >= GETDATE())
+      AND (j.codigo_seccion IS NULL OR j.codigo_seccion = t.csecci COLLATE DATABASE_DEFAULT)
+      AND (j.codigo_cargo IS NULL OR j.codigo_cargo = t.ccargo COLLATE DATABASE_DEFAULT)
     ORDER BY j.nivel_jerarquico ASC;
 """
 
