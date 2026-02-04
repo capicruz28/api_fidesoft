@@ -36,11 +36,34 @@ class UserDataBase(BaseModel):
         examples=["juan_perez", "maria.garcia"]
     )
     
-    correo: Optional[EmailStr] = Field(
-        ...,
-        description="Dirección de correo electrónico válida del usuario",
-        examples=["usuario@empresa.com", "nombre.apellido@dominio.org"]
+    correo: Optional[str] = Field(
+        None,
+        description="Dirección de correo electrónico válida del usuario (opcional, puede estar vacío para usuarios cliente)",
+        examples=["usuario@empresa.com", "nombre.apellido@dominio.org", None]
     )
+    
+    @field_validator('correo')
+    @classmethod
+    def validar_correo(cls, valor: Optional[str]) -> Optional[str]:
+        """
+        Valida y normaliza el correo electrónico.
+        Convierte cadenas vacías a None y valida formato básico si tiene valor.
+        """
+        if valor is None:
+            return None
+        
+        valor = valor.strip()
+        
+        if valor == '':
+            return None
+        
+        # Validar formato básico de email solo si tiene valor
+        # Usamos validación simple para permitir correos válidos pero ser permisivo con formatos no estándar
+        if '@' not in valor:
+            # Si no tiene @, retornar None en lugar de fallar (para usuarios cliente sin correo)
+            return None
+        
+        return valor
     
     nombre: Optional[str] = Field(
         None,
@@ -64,6 +87,30 @@ class UserDataBase(BaseModel):
         None, 
         max_length=25, 
         description="Código de trabajador del sistema externo para sincronización de perfil."
+    )
+    
+    tipo_trabajador: Optional[str] = Field(
+        None,
+        max_length=10,
+        description="Tipo de trabajador (ctptra) del sistema cliente."
+    )
+    
+    descripcion_usuario: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Descripción del usuario (dusuar) del sistema cliente."
+    )
+    
+    area: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Área del trabajador del sistema cliente."
+    )
+    
+    cargo: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Cargo del trabajador del sistema cliente."
     )
 
     @field_validator('nombre_usuario')

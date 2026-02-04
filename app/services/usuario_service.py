@@ -881,7 +881,10 @@ class UsuarioService(BaseService):
             logger.debug(f"Total de usuarios encontrados: {total_usuarios}")
 
             # 📋 OBTENER DATOS PAGINADOS CON ROLES
-            data_params = (search_param, search_param, search_param, search_param, search_param, offset, limit)
+            # Parámetros: search (5 veces para WHERE), offset+1, offset+limit (para BETWEEN)
+            start_row = offset + 1  # BETWEEN es inclusivo, ROW_NUMBER empieza en 1
+            end_row = offset + limit
+            data_params = (search_param, search_param, search_param, search_param, search_param, start_row, end_row)
             raw_results = execute_query(SELECT_USUARIOS_PAGINATED, data_params)
 
             # 🎯 PROCESAR RESULTADOS - AGRUPAR ROLES POR USUARIO
@@ -965,7 +968,9 @@ class UsuarioService(BaseService):
         
         🔐 RESET SEGURO:
         - Verifica que el usuario exista y no esté eliminado
-        - Aplica hash seguro a la nueva contraseña
+        - Detecta origen_datos para actualizar en la tabla correcta:
+          - Si origen_datos='local' → actualiza en tabla usuario (con hash bcrypt)
+          - Si origen_datos='cliente' → actualiza en tabla usuarios_web00 (texto plano)
         - Actualiza fecha de modificación
         - No requiere conocer la contraseña actual
         
@@ -983,43 +988,72 @@ class UsuarioService(BaseService):
         logger.info(f"Intentando resetear contraseña para usuario ID: {usuario_id}")
 
         try:
-            # 🔍 VERIFICAR EXISTENCIA DEL USUARIO
-            usuario_existente = await UsuarioService.obtener_usuario_por_id(usuario_id)
-            if not usuario_existente:
+            # 🔍 VERIFICAR EXISTENCIA DEL USUARIO Y OBTENER ORIGEN_DATOS
+            from app.db.queries import GET_NOMBRE_USUARIO_BY_ID, UPDATE_CLIENTE_PASSWORD, AUTHENTICATE_CLIENTE_USER
+            usuario_info = execute_query(GET_NOMBRE_USUARIO_BY_ID, (usuario_id,))
+            
+            if not usuario_info:
                 raise NotFoundError(
                     detail="Usuario no encontrado",
                     internal_code="USER_NOT_FOUND"
                 )
-
-            # 🔐 APLICAR HASH SEGURO A NUEVA CONTRASEÑA
-            hashed_password = get_password_hash(nueva_contrasena)
-
-            # 💾 EJECUTAR ACTUALIZACIÓN DE CONTRASEÑA
-            update_query = """
-            UPDATE dbo.usuario
-            SET contrasena = ?, fecha_actualizacion = GETDATE()
-            OUTPUT
-                INSERTED.usuario_id, INSERTED.nombre_usuario, INSERTED.correo,
-                INSERTED.nombre, INSERTED.apellido, INSERTED.es_activo
-            WHERE usuario_id = ? AND es_eliminado = 0
-            """
             
-            result = execute_update(update_query, (hashed_password, usuario_id))
+            usuario_data = usuario_info[0]
+            origen_datos = usuario_data.get('origen_datos', 'local')
+            nombre_usuario = usuario_data.get('nombre_usuario')
 
-            if not result:
-                logger.warning(f"No se pudo resetear la contraseña del usuario ID {usuario_id}")
-                raise ServiceError(
-                    status_code=404,
-                    detail="Error al resetear la contraseña, usuario no encontrado o no se pudo modificar",
-                    internal_code="PASSWORD_RESET_FAILED"
-                )
+            if origen_datos == 'cliente':
+                # 🟢 USUARIO CLIENTE: Actualizar en usuarios_web00 (texto plano)
+                logger.info(f"Reseteando contraseña en usuarios_web00 para usuario cliente '{nombre_usuario}'")
+                
+                # Actualizar en usuarios_web00 (contraseña en texto plano)
+                update_query_cliente = UPDATE_CLIENTE_PASSWORD
+                execute_update(update_query_cliente, (nueva_contrasena, nombre_usuario))
+                
+                # Obtener datos del usuario para la respuesta
+                usuario_existente = await UsuarioService.obtener_usuario_por_id(usuario_id)
+                
+                logger.info(f"Contraseña reseteada exitosamente en usuarios_web00 para usuario ID {usuario_id}")
+                return {
+                    "message": "Contraseña reseteada exitosamente en sistema cliente",
+                    "usuario_id": usuario_id,
+                    "nombre_usuario": nombre_usuario,
+                    "origen_datos": "cliente"
+                }
+            else:
+                # 🔵 USUARIO LOCAL: Actualizar en tabla usuario (con hash bcrypt)
+                logger.info(f"Reseteando contraseña en tabla usuario para usuario local ID {usuario_id}")
+                
+                # 🔐 APLICAR HASH SEGURO A NUEVA CONTRASEÑA
+                hashed_password = get_password_hash(nueva_contrasena)
 
-            logger.info(f"Contraseña reseteada exitosamente para usuario ID {usuario_id}")
-            return {
-                "message": "Contraseña reseteada exitosamente",
-                "usuario_id": result['usuario_id'],
-                "nombre_usuario": result['nombre_usuario']
-            }
+                # 💾 EJECUTAR ACTUALIZACIÓN DE CONTRASEÑA
+                update_query = """
+                UPDATE dbo.usuario
+                SET contrasena = ?, fecha_actualizacion = GETDATE()
+                OUTPUT
+                    INSERTED.usuario_id, INSERTED.nombre_usuario, INSERTED.correo,
+                    INSERTED.nombre, INSERTED.apellido, INSERTED.es_activo
+                WHERE usuario_id = ? AND es_eliminado = 0
+                """
+                
+                result = execute_update(update_query, (hashed_password, usuario_id))
+
+                if not result:
+                    logger.warning(f"No se pudo resetear la contraseña del usuario ID {usuario_id}")
+                    raise ServiceError(
+                        status_code=404,
+                        detail="Error al resetear la contraseña, usuario no encontrado o no se pudo modificar",
+                        internal_code="PASSWORD_RESET_FAILED"
+                    )
+
+                logger.info(f"Contraseña reseteada exitosamente para usuario ID {usuario_id}")
+                return {
+                    "message": "Contraseña reseteada exitosamente",
+                    "usuario_id": result['usuario_id'],
+                    "nombre_usuario": result['nombre_usuario'],
+                    "origen_datos": "local"
+                }
 
         except (NotFoundError, ValidationError):
             raise
@@ -1046,8 +1080,11 @@ class UsuarioService(BaseService):
         
         🔐 CAMBIO SEGURO:
         - Verifica que el usuario exista y no esté eliminado
+        - Detecta origen_datos para validar y actualizar en la tabla correcta:
+          - Si origen_datos='local' → valida contra tabla usuario (hash bcrypt) y actualiza ahí
+          - Si origen_datos='cliente' → valida contra usuarios_web00 (texto plano) y actualiza ahí
         - Valida la contraseña actual antes de cambiar
-        - Aplica hash seguro a la nueva contraseña
+        - Aplica hash seguro a la nueva contraseña (solo para usuarios local)
         - Actualiza fecha de modificación
         
         Args:
@@ -1066,60 +1103,110 @@ class UsuarioService(BaseService):
         logger.info(f"Intentando cambiar contraseña propia para usuario ID: {usuario_id}")
 
         try:
-            # 🔍 VERIFICAR EXISTENCIA DEL USUARIO Y OBTENER CONTRASEÑA ACTUAL
-            query = """
-            SELECT usuario_id, nombre_usuario, contrasena, es_activo
-            FROM dbo.usuario
-            WHERE usuario_id = ? AND es_eliminado = 0
-            """
+            # 🔍 VERIFICAR EXISTENCIA DEL USUARIO Y OBTENER ORIGEN_DATOS
+            from app.db.queries import GET_NOMBRE_USUARIO_BY_ID, UPDATE_CLIENTE_PASSWORD, AUTHENTICATE_CLIENTE_USER
             
-            usuario_data = execute_query(query, (usuario_id,))
+            usuario_info = execute_query(GET_NOMBRE_USUARIO_BY_ID, (usuario_id,))
             
-            if not usuario_data:
+            if not usuario_info:
                 raise NotFoundError(
                     detail="Usuario no encontrado",
                     internal_code="USER_NOT_FOUND"
                 )
-
-            usuario = usuario_data[0]
             
-            # 🔐 VALIDAR CONTRASEÑA ACTUAL
-            if not verify_password(contrasena_actual, usuario['contrasena']):
-                logger.warning(f"Intento de cambiar contraseña con contraseña actual incorrecta para usuario ID {usuario_id}")
-                raise ValidationError(
-                    detail="La contraseña actual es incorrecta",
-                    internal_code="INVALID_CURRENT_PASSWORD"
-                )
+            usuario_data = usuario_info[0]
+            origen_datos = usuario_data.get('origen_datos', 'local')
+            nombre_usuario = usuario_data.get('nombre_usuario')
 
-            # 🔐 APLICAR HASH SEGURO A NUEVA CONTRASEÑA
-            hashed_password = get_password_hash(nueva_contrasena)
+            if origen_datos == 'cliente':
+                # 🟢 USUARIO CLIENTE: Validar y actualizar en usuarios_web00 (texto plano)
+                logger.info(f"Cambiando contraseña en usuarios_web00 para usuario cliente '{nombre_usuario}'")
+                
+                # Validar contraseña actual contra usuarios_web00
+                cliente_user = execute_auth_query(AUTHENTICATE_CLIENTE_USER, (nombre_usuario,))
+                
+                if not cliente_user:
+                    raise NotFoundError(
+                        detail="Usuario no encontrado en sistema cliente",
+                        internal_code="CLIENTE_USER_NOT_FOUND"
+                    )
+                
+                if cliente_user['contrasena'] != contrasena_actual:
+                    logger.warning(f"Intento de cambiar contraseña con contraseña actual incorrecta para usuario cliente '{nombre_usuario}'")
+                    raise ValidationError(
+                        detail="La contraseña actual es incorrecta",
+                        internal_code="INVALID_CURRENT_PASSWORD"
+                    )
+                
+                # Actualizar contraseña en usuarios_web00 (texto plano)
+                execute_update(UPDATE_CLIENTE_PASSWORD, (nueva_contrasena, nombre_usuario))
+                
+                logger.info(f"Contraseña cambiada exitosamente en usuarios_web00 para usuario ID {usuario_id}")
+                return {
+                    "message": "Contraseña cambiada exitosamente en sistema cliente",
+                    "usuario_id": usuario_id,
+                    "nombre_usuario": nombre_usuario,
+                    "origen_datos": "cliente"
+                }
+            else:
+                # 🔵 USUARIO LOCAL: Validar y actualizar en tabla usuario (con hash bcrypt)
+                logger.info(f"Cambiando contraseña en tabla usuario para usuario local ID {usuario_id}")
+                
+                # 🔍 VERIFICAR EXISTENCIA DEL USUARIO Y OBTENER CONTRASEÑA ACTUAL
+                query = """
+                SELECT usuario_id, nombre_usuario, contrasena, es_activo
+                FROM dbo.usuario
+                WHERE usuario_id = ? AND es_eliminado = 0
+                """
+                
+                usuario_local_data = execute_query(query, (usuario_id,))
+                
+                if not usuario_local_data:
+                    raise NotFoundError(
+                        detail="Usuario no encontrado",
+                        internal_code="USER_NOT_FOUND"
+                    )
 
-            # 💾 EJECUTAR ACTUALIZACIÓN DE CONTRASEÑA
-            update_query = """
-            UPDATE dbo.usuario
-            SET contrasena = ?, fecha_actualizacion = GETDATE()
-            OUTPUT
-                INSERTED.usuario_id, INSERTED.nombre_usuario, INSERTED.correo,
-                INSERTED.nombre, INSERTED.apellido, INSERTED.es_activo
-            WHERE usuario_id = ? AND es_eliminado = 0
-            """
-            
-            result = execute_update(update_query, (hashed_password, usuario_id))
+                usuario_local = usuario_local_data[0]
+                
+                # 🔐 VALIDAR CONTRASEÑA ACTUAL
+                if not verify_password(contrasena_actual, usuario_local['contrasena']):
+                    logger.warning(f"Intento de cambiar contraseña con contraseña actual incorrecta para usuario ID {usuario_id}")
+                    raise ValidationError(
+                        detail="La contraseña actual es incorrecta",
+                        internal_code="INVALID_CURRENT_PASSWORD"
+                    )
 
-            if not result:
-                logger.warning(f"No se pudo cambiar la contraseña del usuario ID {usuario_id}")
-                raise ServiceError(
-                    status_code=404,
-                    detail="Error al cambiar la contraseña, usuario no encontrado o no se pudo modificar",
-                    internal_code="PASSWORD_CHANGE_FAILED"
-                )
+                # 🔐 APLICAR HASH SEGURO A NUEVA CONTRASEÑA
+                hashed_password = get_password_hash(nueva_contrasena)
 
-            logger.info(f"Contraseña cambiada exitosamente para usuario ID {usuario_id}")
-            return {
-                "message": "Contraseña cambiada exitosamente",
-                "usuario_id": result['usuario_id'],
-                "nombre_usuario": result['nombre_usuario']
-            }
+                # 💾 EJECUTAR ACTUALIZACIÓN DE CONTRASEÑA
+                update_query = """
+                UPDATE dbo.usuario
+                SET contrasena = ?, fecha_actualizacion = GETDATE()
+                OUTPUT
+                    INSERTED.usuario_id, INSERTED.nombre_usuario, INSERTED.correo,
+                    INSERTED.nombre, INSERTED.apellido, INSERTED.es_activo
+                WHERE usuario_id = ? AND es_eliminado = 0
+                """
+                
+                result = execute_update(update_query, (hashed_password, usuario_id))
+
+                if not result:
+                    logger.warning(f"No se pudo cambiar la contraseña del usuario ID {usuario_id}")
+                    raise ServiceError(
+                        status_code=404,
+                        detail="Error al cambiar la contraseña, usuario no encontrado o no se pudo modificar",
+                        internal_code="PASSWORD_CHANGE_FAILED"
+                    )
+
+                logger.info(f"Contraseña cambiada exitosamente para usuario ID {usuario_id}")
+                return {
+                    "message": "Contraseña cambiada exitosamente",
+                    "usuario_id": result['usuario_id'],
+                    "nombre_usuario": result['nombre_usuario'],
+                    "origen_datos": "local"
+                }
 
         except (NotFoundError, ValidationError):
             raise

@@ -65,13 +65,37 @@ class UsuarioBase(BaseModel):
     origen_datos: str = Field(
         'local',
         max_length=10, 
-        description="Origen de los datos de perfil: 'local', 'externo', etc. Default 'local'."
+        description="Origen de los datos de perfil: 'local', 'cliente', etc. Default 'local'."
     )
     
     codigo_trabajador_externo: Optional[str] = Field(
         None, 
         max_length=25, 
         description="Código de trabajador del sistema externo para sincronización de perfil."
+    )
+    
+    tipo_trabajador: Optional[str] = Field(
+        None,
+        max_length=10,
+        description="Tipo de trabajador (ctptra) del sistema cliente."
+    )
+    
+    descripcion_usuario: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Descripción del usuario (dusuar) del sistema cliente."
+    )
+    
+    area: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Área del trabajador del sistema cliente."
+    )
+    
+    cargo: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Cargo del trabajador del sistema cliente."
     )
     # ------------------------------------
 

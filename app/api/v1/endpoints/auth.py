@@ -15,7 +15,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from typing import Dict
 
 from app.schemas.auth import Token, UserDataWithRoles
-from app.schemas.usuario import UsuarioReadWithRoles
+from app.schemas.usuario import UsuarioReadWithRoles, PasswordChange
 from app.core.auth import (
     authenticate_user,
     create_access_token,
@@ -25,6 +25,7 @@ from app.core.auth import (
 )
 from app.core.config import settings
 from app.core.logging_config import get_logger
+from app.core.exceptions import CustomException
 from app.services.usuario_service import UsuarioService
 from app.api.deps import get_current_active_user
 
@@ -327,3 +328,86 @@ async def logout(response: Response):
     )
     logger.info("Usuario cerró sesión exitosamente")
     return {"message": "Sesión cerrada exitosamente"}
+
+# ----------------------------------------------------------------------
+# --- Endpoint para Cambiar Contraseña Propia ---
+# ----------------------------------------------------------------------
+@router.post(
+    "/change-password/",
+    response_model=dict,
+    summary="Cambiar contraseña propia",
+    description="""
+    Permite a un usuario autenticado cambiar su propia contraseña proporcionando
+    la contraseña actual y la nueva contraseña.
+    
+    **Permisos requeridos:**
+    - Autenticación (Access Token válido en header `Authorization: Bearer <token>`)
+    
+    **Validaciones:**
+    - La contraseña actual debe ser correcta
+    - La nueva contraseña debe ser diferente a la actual
+    - La nueva contraseña debe cumplir con las políticas de seguridad:
+      - Mínimo 8 caracteres
+      - Al menos una letra mayúscula
+      - Al menos una letra minúscula
+      - Al menos un número
+    
+    **Funciona para:**
+    - Usuarios web (con Access Token en header Authorization)
+    - Usuarios mobile (con Access Token en header Authorization)
+    - Usuarios locales (origen_datos='local')
+    - Usuarios cliente (origen_datos='cliente')
+    
+    **Respuestas:**
+    - 200: Contraseña cambiada exitosamente
+    - 400: Contraseña actual incorrecta o nueva contraseña igual a la actual
+    - 401: Token inválido o expirado
+    - 422: Error de validación en la nueva contraseña
+    - 500: Error interno del servidor
+    """
+)
+async def change_password(
+    password_change: PasswordChange,
+    current_user: UsuarioReadWithRoles = Depends(get_current_active_user)
+):
+    """
+    Endpoint para que un usuario autenticado cambie su propia contraseña.
+    
+    Este endpoint funciona automáticamente con el usuario del token JWT,
+    no requiere especificar usuario_id en la URL.
+    
+    Args:
+        password_change: Datos con contraseña actual y nueva contraseña
+        current_user: Usuario autenticado obtenido del Access Token
+        
+    Returns:
+        dict: Resultado del cambio con metadatos
+        
+    Raises:
+        HTTPException: En caso de error de validación, no autorizado o error interno
+    """
+    logger.info(f"Solicitud POST /auth/change-password/ recibida para usuario ID: {current_user.usuario_id}")
+    
+    try:
+        usuario_service = UsuarioService()
+        result = await usuario_service.cambiar_contrasena_propia(
+            usuario_id=current_user.usuario_id,
+            contrasena_actual=password_change.contrasena_actual,
+            nueva_contrasena=password_change.nueva_contrasena
+        )
+        
+        logger.info(f"Contraseña cambiada exitosamente para usuario ID {current_user.usuario_id}")
+        return result
+        
+    except CustomException as ce:
+        logger.warning(f"Error de negocio al cambiar contraseña para usuario {current_user.usuario_id}: {ce.detail}")
+        raise HTTPException(
+            status_code=ce.status_code, 
+            detail=ce.detail
+        )
+    except Exception as e:
+        logger.exception(f"Error inesperado en endpoint POST /auth/change-password/")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor al cambiar la contraseña."
+        )

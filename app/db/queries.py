@@ -190,8 +190,23 @@ def execute_transaction(
         raise DatabaseError(detail=f"Error inesperado en transacción: {str(e)}")
 
 # Consulta para obtener usuarios paginados con sus roles, filtrando eliminados y buscando
+# CORREGIDA: Usa DENSE_RANK() para paginar sobre usuarios únicos, no sobre filas con JOIN
 SELECT_USUARIOS_PAGINATED = """
-WITH UserRoles AS (
+WITH UsuariosPaginados AS (
+    SELECT
+        u.usuario_id,
+        ROW_NUMBER() OVER (ORDER BY u.usuario_id) AS rn
+    FROM usuario u
+    WHERE
+        u.es_eliminado = 0
+        AND (? IS NULL OR (
+            u.nombre_usuario LIKE ? OR
+            u.correo LIKE ? OR
+            u.nombre LIKE ? OR
+            u.apellido LIKE ?
+        ))
+),
+UserRoles AS (
     SELECT
         u.usuario_id,
         u.nombre_usuario,
@@ -207,23 +222,16 @@ WITH UserRoles AS (
         u.codigo_trabajador_externo,
         r.rol_id,
         r.nombre AS nombre_rol,
-        ROW_NUMBER() OVER (ORDER BY u.usuario_id) AS rn
-    FROM usuario u
+        up.rn
+    FROM UsuariosPaginados up
+    INNER JOIN usuario u ON up.usuario_id = u.usuario_id
     LEFT JOIN usuario_rol ur ON u.usuario_id = ur.usuario_id AND ur.es_activo = 1
     LEFT JOIN rol r ON ur.rol_id = r.rol_id AND r.es_activo = 1
-    WHERE
-        u.es_eliminado = 0
-        AND (? IS NULL OR (
-            u.nombre_usuario LIKE ? OR
-            u.correo LIKE ? OR
-            u.nombre LIKE ? OR
-            u.apellido LIKE ?
-        ))
+    WHERE up.rn BETWEEN ? AND ?
 )
 SELECT *
 FROM UserRoles
-WHERE rn BETWEEN ? AND ?
-ORDER BY rn;
+ORDER BY rn, rol_id;
 """
 
 # Consulta para contar el total de usuarios que coinciden con la búsqueda y no están eliminados
@@ -1471,4 +1479,65 @@ SELECT_AREA_TRABAJADOR = """
     SELECT careas AS codigo_area
     FROM dbo.vw_mtraba10
     WHERE ctraba = ?;
+"""
+
+# ============================================
+# QUERIES PARA AUTENTICACIÓN CONTRA usuarios_web00
+# ============================================
+
+# Autenticar usuario contra tabla usuarios_web00 (contraseña en texto plano)
+AUTHENTICATE_CLIENTE_USER = """
+    SELECT 
+        cusuar AS nombre_usuario,
+        dclave AS contrasena,
+        ctraba AS codigo_trabajador
+    FROM usuarios_web00
+    WHERE cusuar = ?;
+"""
+
+# Obtener datos completos del usuario desde usuarios_web00 y mtraba_web00 para crear registro
+SELECT_CLIENTE_USER_DATA = """
+    SELECT 
+        a.cusuar AS nombre_usuario,
+        a.ctptra AS tipo_trabajador,
+        a.dusuar AS descripcion_usuario,
+        a.ctraba AS codigo_trabajador,
+        b.correo AS correo,
+        b.area AS area,
+        b.cargo AS cargo,
+        b.nombres AS nombre,
+        b.apellidos AS apellido
+    FROM usuarios_web00 a
+    INNER JOIN mtraba_web00 b ON a.ctraba = b.ctraba
+    WHERE a.cusuar = ?;
+"""
+
+# Insertar nuevo usuario desde datos de cliente (sin campos adicionales que no están en tabla usuario)
+# Nota: Usamos una cadena vacía para contrasena porque usuarios cliente se autentican contra usuarios_web00
+INSERT_USUARIO_FROM_CLIENTE = """
+    INSERT INTO usuario (
+        nombre_usuario, correo, contrasena, nombre, apellido,
+        es_activo, correo_confirmado, es_eliminado,
+        origen_datos, codigo_trabajador_externo
+    )
+    OUTPUT
+        INSERTED.usuario_id, INSERTED.nombre_usuario, INSERTED.correo,
+        INSERTED.nombre, INSERTED.apellido, INSERTED.es_activo,
+        INSERTED.correo_confirmado, INSERTED.fecha_creacion,
+        INSERTED.origen_datos, INSERTED.codigo_trabajador_externo
+    VALUES (?, ?, '', ?, ?, 1, 0, 0, 'cliente', ?);
+"""
+
+# Actualizar contraseña en tabla usuarios_web00 (texto plano)
+UPDATE_CLIENTE_PASSWORD = """
+    UPDATE usuarios_web00
+    SET dclave = ?
+    WHERE cusuar = ?;
+"""
+
+# Obtener nombre_usuario desde usuario_id para usuarios cliente
+GET_NOMBRE_USUARIO_BY_ID = """
+    SELECT nombre_usuario, origen_datos, codigo_trabajador_externo
+    FROM usuario
+    WHERE usuario_id = ? AND es_eliminado = 0;
 """

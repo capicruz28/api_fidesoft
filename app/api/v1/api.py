@@ -62,4 +62,3 @@ api_router.include_router(
     prefix="/notificaciones",
     tags=["Notificaciones Push"]
 )
-
