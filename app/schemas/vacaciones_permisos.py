@@ -469,24 +469,37 @@ class PaginatedTrabajadorResponse(BaseModel):
 # ============================================
 
 class BoletaPagoResponse(BaseModel):
-    """Schema para respuesta de boleta de pago"""
+    """Schema para un ítem de boleta de pago"""
     codigo_trabajador: str = Field(..., description="Código del trabajador")
     anio: str = Field(..., description="Año de la boleta")
     mes: str = Field(..., description="Mes de la boleta")
+    nseman: Optional[str] = Field(None, description="Número de semana (nseman)")
+    semana: Optional[int] = Field(None, description="Número de semana dentro del mes (1, 2, 3...)")
     archivo_pdf_base64: str = Field(..., description="Archivo PDF en formato base64")
     nombre_archivo: str = Field(..., description="Nombre sugerido para el archivo")
     
     class Config:
         from_attributes = True
+
+
+class BoletasPagoResponse(BaseModel):
+    """Schema para respuesta de lista de boletas de pago (año completo o un mes)"""
+    items: List[BoletaPagoResponse] = Field(..., description="Lista de boletas de pago")
 
 
 class CertificadoCTSResponse(BaseModel):
-    """Schema para respuesta de certificado CTS"""
+    """Schema para un ítem de certificado CTS"""
     codigo_trabajador: str = Field(..., description="Código del trabajador")
     anio: str = Field(..., description="Año del certificado")
-    mes: Optional[str] = Field(None, description="Mes del certificado (si aplica)")
+    mes: Optional[str] = Field(None, description="Mes del certificado (ej. 05, 11)")
+    nseman: Optional[str] = Field(None, description="Número de semana (nseman)")
     archivo_pdf_base64: str = Field(..., description="Archivo PDF en formato base64")
     nombre_archivo: str = Field(..., description="Nombre sugerido para el archivo")
     
     class Config:
         from_attributes = True
+
+
+class CertificadosCTSResponse(BaseModel):
+    """Schema para respuesta de lista de certificados CTS (normalmente 2 por año)"""
+    items: List[CertificadoCTSResponse] = Field(..., description="Lista de certificados CTS del año")

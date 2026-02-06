@@ -1594,29 +1594,50 @@ GET_NOMBRE_USUARIO_BY_ID = """
 # QUERIES PARA BOLETAS Y CERTIFICADOS CTS
 # ============================================
 
-# Obtener boleta de pago por trabajador, año y mes
+# Obtener boletas de pago por trabajador, año y mes (con nseman y número de semana por partición mes)
 SELECT_BOLETA_PAGO = """
     SELECT 
         ctraba AS codigo_trabajador,
         cannos AS anio,
         cmeses AS mes,
+        nseman AS nseman,
+        ROW_NUMBER() OVER (PARTITION BY cannos, cmeses ORDER BY nseman) AS semana,
         darchi AS archivo_pdf_hex
     FROM pbolet00
     WHERE ctraba = ? 
       AND cannos = ? 
       AND cmeses = ? 
-      AND ctpref = 'BO';
+      AND ctpref = 'BO'
+    ORDER BY nseman;
 """
 
-# Obtener certificado CTS por trabajador y año
-SELECT_CERTIFICADO_CTS = """
+# Obtener todas las boletas de pago de un trabajador por año (todos los meses, con nseman y semana)
+SELECT_BOLETAS_PAGO_POR_ANIO = """
     SELECT 
         ctraba AS codigo_trabajador,
         cannos AS anio,
         cmeses AS mes,
+        nseman AS nseman,
+        ROW_NUMBER() OVER (PARTITION BY cannos, cmeses ORDER BY nseman) AS semana,
         darchi AS archivo_pdf_hex
     FROM pbolet00
     WHERE ctraba = ? 
       AND cannos = ? 
-      AND ctpref = 'CT';
+      AND ctpref = 'BO'
+    ORDER BY cmeses, nseman;
+"""
+
+# Obtener todos los certificados CTS por trabajador y año (con nseman)
+SELECT_CERTIFICADOS_CTS = """
+    SELECT 
+        ctraba AS codigo_trabajador,
+        cannos AS anio,
+        cmeses AS mes,
+        nseman AS nseman,
+        darchi AS archivo_pdf_hex
+    FROM pbolet00
+    WHERE ctraba = ? 
+      AND cannos = ? 
+      AND ctpref = 'CT'
+    ORDER BY cmeses, nseman;
 """

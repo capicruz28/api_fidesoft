@@ -7,7 +7,7 @@ incluyendo funcionalidades para empleados y aprobadores.
 """
 
 from fastapi import APIRouter, HTTPException, Depends, status, Query, Request
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from datetime import date
 
 # Schemas
@@ -17,7 +17,7 @@ from app.schemas.vacaciones_permisos import (
     NotificacionRead, PaginatedNotificacionResponse,
     SaldoVacacionesRead, CatalogosResponse, CatalogoItem,
     PaginatedSolicitudResponse, TrabajadorRead, PaginatedTrabajadorResponse,
-    BoletaPagoResponse, CertificadoCTSResponse
+    BoletaPagoResponse, BoletasPagoResponse, CertificadoCTSResponse, CertificadosCTSResponse
 )
 
 # Servicios
@@ -736,86 +736,84 @@ async def listar_trabajadores(
 
 @router.get(
     "/boleta-pago",
-    response_model=BoletaPagoResponse,
-    summary="Obtener boleta de pago",
+    response_model=BoletasPagoResponse,
+    summary="Obtener boleta(s) de pago",
     description="""
-    Obtiene la boleta de pago de un trabajador para un año y mes específicos.
-    El archivo PDF se devuelve en formato base64 para facilitar su consumo desde web y mobile.
+    Obtiene boleta(s) de pago del trabajador.
+    
+    **Comportamiento:**
+    - Solo **anio**: devuelve todas las boletas del año (lista).
+    - **anio** y **mes**: devuelve solo la boleta de ese año y mes (lista con 1 ítem).
     
     **Parámetros:**
-    - anio: Año de la boleta (formato: YYYY, ej: 2025)
-    - mes: Mes de la boleta (formato: MM, ej: 09)
+    - anio: Año de la boleta (formato: YYYY, ej: 2025) — requerido
+    - mes: Mes de la boleta (formato: MM, ej: 09) — opcional. Si no se envía, se devuelven todas las boletas del año.
     
-    **Respuesta:**
-    - codigo_trabajador: Código del trabajador
-    - anio: Año de la boleta
-    - mes: Mes de la boleta
-    - archivo_pdf_base64: Archivo PDF codificado en base64
-    - nombre_archivo: Nombre sugerido para guardar el archivo
+    **Respuesta:** Siempre un objeto con clave `items` (lista). Cada ítem tiene:
+    - codigo_trabajador, anio, mes
+    - archivo_pdf_base64: PDF en base64
+    - nombre_archivo: Nombre sugerido para guardar
     
     **Uso en Frontend:**
-    - Web: Convertir base64 a blob y crear URL para descarga o visualización
-    - Mobile: Decodificar base64 y guardar como archivo PDF
+    - Web/Mobile: Recorrer `items` y descargar o visualizar cada PDF.
     """
 )
 async def obtener_boleta_pago(
     anio: str = Query(..., description="Año de la boleta (YYYY)", regex="^[0-9]{4}$"),
-    mes: str = Query(..., description="Mes de la boleta (MM)", regex="^[0-9]{2}$"),
+    mes: Optional[str] = Query(None, description="Mes de la boleta (MM). Opcional: si no se envía, se devuelven todas las boletas del año.", regex="^[0-9]{2}$"),
     current_user: UsuarioReadWithRoles = Depends(get_current_active_user)
 ):
     """
-    Obtiene la boleta de pago del usuario autenticado para un año y mes específicos.
+    Obtiene boleta(s) de pago del usuario autenticado.
+    Si solo se envía anio, devuelve todas las boletas del año; si se envía anio y mes, solo esa boleta.
     """
     try:
         codigo_trabajador = obtener_codigo_trabajador(current_user)
         
-        resultado = await VacacionesPermisosService.obtener_boleta_pago(
+        resultado = await VacacionesPermisosService.obtener_boletas_pago(
             codigo_trabajador=codigo_trabajador,
             anio=anio,
             mes=mes
         )
         
-        logger.info(f"Boleta de pago obtenida para trabajador {codigo_trabajador}, año {anio}, mes {mes}")
+        logger.info(f"Boletas de pago obtenidas para trabajador {codigo_trabajador}, año {anio}, mes={mes} -> {len(resultado.get('items', []))} ítem(s)")
         return resultado
         
     except HTTPException:
         raise
     except CustomException as ce:
-        # Convertir CustomException (NotFoundError, ServiceError, etc.) a HTTPException
-        logger.warning(f"Error de negocio al obtener boleta de pago: {ce.detail}")
+        logger.warning(f"Error de negocio al obtener boletas de pago: {ce.detail}")
         raise HTTPException(
             status_code=ce.status_code,
             detail=ce.detail
         )
     except Exception as e:
-        logger.exception(f"Error inesperado obteniendo boleta de pago: {str(e)}")
+        logger.exception(f"Error inesperado obteniendo boletas de pago: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error al obtener la boleta de pago"
+            detail="Error al obtener las boletas de pago"
         )
 
 
 @router.get(
     "/certificado-cts",
-    response_model=CertificadoCTSResponse,
-    summary="Obtener certificado CTS",
+    response_model=CertificadosCTSResponse,
+    summary="Obtener certificados CTS",
     description="""
-    Obtiene el certificado CTS de un trabajador para un año específico.
-    El archivo PDF se devuelve en formato base64 para facilitar su consumo desde web y mobile.
+    Obtiene todos los certificados CTS del trabajador para un año.
+    Normalmente hay 2 certificados por año (ej. mayo y noviembre).
+    Si el año está en curso puede haber 1 registro parcial.
     
     **Parámetros:**
     - anio: Año del certificado (formato: YYYY, ej: 2024)
     
-    **Respuesta:**
-    - codigo_trabajador: Código del trabajador
-    - anio: Año del certificado
-    - mes: Mes del certificado (si aplica, puede ser None)
-    - archivo_pdf_base64: Archivo PDF codificado en base64
-    - nombre_archivo: Nombre sugerido para guardar el archivo
+    **Respuesta:** Objeto con clave `items` (lista de certificados). Cada ítem tiene:
+    - codigo_trabajador, anio, mes (ej. 05, 11)
+    - archivo_pdf_base64: PDF en base64
+    - nombre_archivo: Nombre sugerido para guardar
     
     **Uso en Frontend:**
-    - Web: Convertir base64 a blob y crear URL para descarga o visualización
-    - Mobile: Decodificar base64 y guardar como archivo PDF
+    - Recorrer `items` y descargar o visualizar cada PDF.
     """
 )
 async def obtener_certificado_cts(
@@ -823,31 +821,30 @@ async def obtener_certificado_cts(
     current_user: UsuarioReadWithRoles = Depends(get_current_active_user)
 ):
     """
-    Obtiene el certificado CTS del usuario autenticado para un año específico.
+    Obtiene todos los certificados CTS del usuario autenticado para el año (normalmente 2).
     """
     try:
         codigo_trabajador = obtener_codigo_trabajador(current_user)
         
-        resultado = await VacacionesPermisosService.obtener_certificado_cts(
+        resultado = await VacacionesPermisosService.obtener_certificados_cts(
             codigo_trabajador=codigo_trabajador,
             anio=anio
         )
         
-        logger.info(f"Certificado CTS obtenido para trabajador {codigo_trabajador}, año {anio}")
+        logger.info(f"Certificados CTS obtenidos para trabajador {codigo_trabajador}, año {anio} -> {len(resultado.get('items', []))} ítem(s)")
         return resultado
         
     except HTTPException:
         raise
     except CustomException as ce:
-        # Convertir CustomException (NotFoundError, ServiceError, etc.) a HTTPException
-        logger.warning(f"Error de negocio al obtener certificado CTS: {ce.detail}")
+        logger.warning(f"Error de negocio al obtener certificados CTS: {ce.detail}")
         raise HTTPException(
             status_code=ce.status_code,
             detail=ce.detail
         )
     except Exception as e:
-        logger.exception(f"Error inesperado obteniendo certificado CTS: {str(e)}")
+        logger.exception(f"Error inesperado obteniendo certificados CTS: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error al obtener el certificado CTS"
+            detail="Error al obtener los certificados CTS"
         )
