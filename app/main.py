@@ -22,11 +22,9 @@ def create_application() -> FastAPI:
     app = FastAPI(
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
-        description=settings.DESCRIPTION,
-        root_path="/api",
+        description=settings.DESCRIPTION,        
         docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        redoc_url="/redoc",        
         redirect_slashes=False  # ✅ Deshabilitar redirecciones automáticas
     )
 
