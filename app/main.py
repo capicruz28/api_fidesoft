@@ -22,7 +22,8 @@ def create_application() -> FastAPI:
     app = FastAPI(
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
-        description=settings.DESCRIPTION,        
+        description=settings.DESCRIPTION,
+        root_path="/api",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
