@@ -9,7 +9,7 @@ load_dotenv()
 
 class Settings(BaseSettings):
     # API
-    API_V1_STR: str = "/api/v1"
+    API_V1_STR: str = "/v1"
     PROJECT_NAME: str = "Service API"
     VERSION: str = "1.0.0"
     DESCRIPTION: str = "API FastAPI para Service"
