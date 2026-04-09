@@ -201,7 +201,7 @@ async def check_drivers():
     drivers = test_drivers()
     return {
         "drivers_available": list(drivers),
-        "odbc_17_found": 'ODBC Driver 18 for SQL Server' in drivers
+        "odbc_17_found": 'ODBC Driver 17 for SQL Server' in drivers
     }
 
 @app.get("/debug-env")

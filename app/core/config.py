@@ -76,7 +76,7 @@ class Settings(BaseSettings):
         """
         if is_admin:
             return (
-                f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
                 f"SERVER={self.DB_ADMIN_SERVER},{self.DB_ADMIN_PORT};"
                 f"DATABASE={self.DB_ADMIN_DATABASE};"
                 f"UID={self.DB_ADMIN_USER};"
@@ -84,7 +84,7 @@ class Settings(BaseSettings):
                 "TrustServerCertificate=yes;"
             )
         return (
-            f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
             f"SERVER={self.DB_SERVER},{self.DB_PORT};"
             f"DATABASE={self.DB_DATABASE};"
             f"UID={self.DB_USER};"

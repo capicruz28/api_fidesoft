@@ -19,7 +19,7 @@ def get_connection_string(connection_type: DatabaseConnection = DatabaseConnecti
     if connection_type == DatabaseConnection.ADMIN:
         # Conexión para administración
         return (
-            f"DRIVER={{SQL Server Native Client 10.0}};"
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
             f"SERVER={settings.DB_ADMIN_SERVER},{settings.DB_ADMIN_PORT};"
             f"DATABASE={settings.DB_ADMIN_DATABASE};"
             f"UID={settings.DB_ADMIN_USER};"
@@ -29,7 +29,7 @@ def get_connection_string(connection_type: DatabaseConnection = DatabaseConnecti
     else:
         # Conexión default (la que ya tenías)
         return (
-            f"DRIVER={{SQL Server Native Client 10.0}};"
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
             f"SERVER={settings.DB_SERVER},{settings.DB_PORT};"
             f"DATABASE={settings.DB_DATABASE};"
             f"UID={settings.DB_USER};"
