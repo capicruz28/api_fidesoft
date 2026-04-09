@@ -179,7 +179,7 @@ async def health_check():
     }
 
 # Compatibilidad con código existente
-@app.get("/api/test")
+@app.get("/test")
 async def test_db():
     try:
         with get_db_connection() as conn:
