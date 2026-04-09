@@ -24,7 +24,8 @@ def create_application() -> FastAPI:
         version=settings.VERSION,
         description=settings.DESCRIPTION,        
         docs_url="/docs",
-        redoc_url="/redoc",        
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
         redirect_slashes=False  # ✅ Deshabilitar redirecciones automáticas
     )
 
