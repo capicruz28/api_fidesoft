@@ -326,6 +326,12 @@ class Token(BaseModel):
         examples=["eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."]
     )
     
+    refresh_token: Optional[str] = Field(
+        None,
+        description="Refresh Token JWT (solo para clientes mobile o cuando se requiera persistencia explícita)",
+        examples=["eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."]
+    )
+
     token_type: str = Field(
         "bearer",
         description="Tipo de token, siempre 'bearer' para JWT",
@@ -355,6 +361,15 @@ class Token(BaseModel):
         if not valor:
             raise ValueError('El token de acceso no puede estar vacío')
         
+        return valor
+
+    @field_validator('refresh_token')
+    @classmethod
+    def validar_refresh_token(cls, valor: Optional[str]) -> Optional[str]:
+        if valor is None:
+            return None
+        if not valor:
+            raise ValueError('El refresh token no puede estar vacío')
         return valor
 
 class TokenPayload(BaseModel):

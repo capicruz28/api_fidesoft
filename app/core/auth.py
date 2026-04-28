@@ -1,7 +1,9 @@
 # app/core/auth.py
-from datetime import datetime, timedelta
-from typing import Optional, Dict
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any, Tuple
 import logging
+import hashlib
+import uuid
 
 from fastapi import Depends, HTTPException, status, Cookie
 from fastapi.security import OAuth2PasswordBearer
@@ -13,6 +15,7 @@ from app.db.queries import (
     execute_auth_query, 
     execute_query, 
     execute_insert,
+    execute_update,
     AUTHENTICATE_CLIENTE_USER,
     SELECT_CLIENTE_USER_DATA,
     INSERT_USUARIO_FROM_CLIENTE
@@ -47,13 +50,146 @@ def create_refresh_token(data: dict) -> str:
     to_encode = data.copy()
     now = datetime.utcnow()
     expire = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    # Siempre incluir un identificador único (jti) para soportar rotación y revocación real.
+    # Mantener compatibilidad: si el caller ya envía jti, se respeta.
+    jti = to_encode.get("jti") or uuid.uuid4().hex
     to_encode.update({
         "exp": expire,
         "iat": now,
         "type": "refresh",
+        "jti": jti,
     })
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
+
+def create_refresh_token_with_meta(data: dict) -> Tuple[str, str, datetime]:
+    """
+    Crea refresh token y retorna (token, jti, expires_at_utc).
+    """
+    token = create_refresh_token(data=data)
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        jti = str(payload.get("jti") or "")
+        exp = payload.get("exp")
+        if not jti or exp is None:
+            raise JWTError("refresh token missing jti/exp")
+        expires_at = datetime.fromtimestamp(int(exp), tz=timezone.utc)
+        return token, jti, expires_at
+    except Exception as e:
+        logger.error(f"Error generando metadata de refresh token: {str(e)}")
+        raise
+
+
+def hash_token(token: str) -> str:
+    """
+    Hash del refresh token (no guardar en texto plano).
+    SHA-256 hex.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _parse_client_type(client_type: Optional[str]) -> str:
+    ct = (client_type or "").strip().lower()
+    if ct == "mobile":
+        return "mobile"
+    return "web"
+
+
+def save_refresh_token(
+    *,
+    usuario_id: int,
+    refresh_token: str,
+    expires_at: datetime,
+    client_type: str,
+    ip_address: Optional[str],
+    user_agent: Optional[str],
+) -> None:
+    token_hash = hash_token(refresh_token)
+    ct = _parse_client_type(client_type)
+    # expires_at viene en UTC; SQL Server almacenará DATETIME (sin tz). Guardamos como naive UTC.
+    expires_at_naive = expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+    query = """
+        INSERT INTO refresh_tokens (
+            usuario_id, token_hash, expires_at, is_revoked, revoked_at, created_at,
+            client_type, ip_address, user_agent
+        )
+        VALUES (?, ?, ?, 0, NULL, GETDATE(), ?, ?, ?);
+    """
+    execute_insert(
+        query,
+        (
+            usuario_id,
+            token_hash,
+            expires_at_naive,
+            ct,
+            (ip_address or "")[:45],
+            (user_agent or "")[:512],
+        ),
+    )
+
+
+def get_refresh_token_record(token_hash: str) -> Optional[Dict[str, Any]]:
+    query = """
+        SELECT TOP 1
+            token_id, usuario_id, token_hash, expires_at, is_revoked, revoked_at, created_at,
+            client_type, ip_address, user_agent
+        FROM refresh_tokens
+        WHERE token_hash = ?;
+    """
+    return execute_auth_query(query, (token_hash,))
+
+
+def revoke_refresh_token(token_hash: str) -> None:
+    query = """
+        UPDATE refresh_tokens
+        SET is_revoked = 1,
+            revoked_at = COALESCE(revoked_at, GETDATE())
+        WHERE token_hash = ? AND is_revoked = 0;
+    """
+    execute_update(query, (token_hash,))
+
+
+def validate_refresh_token(refresh_token: str) -> Dict[str, Any]:
+    """
+    Valida refresh token (JWT) + existencia/estado en BD (hash).
+    Retorna payload si es válido.
+    """
+    # 1) Validación criptográfica y claims
+    payload = decode_refresh_token(refresh_token)
+    exp = payload.get("exp")
+    if exp is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 2) Validación en BD (hash)
+    token_hash = hash_token(refresh_token)
+    record = get_refresh_token_record(token_hash)
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if record.get("is_revoked"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # expires_at en BD (naive) asumimos UTC. Comparar con utcnow naive.
+    expires_at = record.get("expires_at")
+    if expires_at and isinstance(expires_at, datetime):
+        if expires_at < datetime.utcnow():
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    return payload
 
 def decode_refresh_token(token: str) -> dict:
     """

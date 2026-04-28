@@ -12,16 +12,21 @@ Características principales:
 """
 from fastapi import APIRouter, HTTPException, status, Depends, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import Dict
+from typing import Dict, Optional
+from pydantic import BaseModel, Field
 
 from app.schemas.auth import Token, UserDataWithRoles
 from app.schemas.usuario import UsuarioReadWithRoles, PasswordChange
 from app.core.auth import (
     authenticate_user,
     create_access_token,
-    create_refresh_token,
+    create_refresh_token_with_meta,
     get_current_user,
     get_current_user_from_refresh,
+    save_refresh_token,
+    validate_refresh_token,
+    revoke_refresh_token,
+    hash_token,
 )
 from app.core.config import settings
 from app.core.logging_config import get_logger
@@ -31,6 +36,27 @@ from app.api.deps import get_current_active_user
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+class RefreshRequest(BaseModel):
+    refresh_token: Optional[str] = Field(None, description="Refresh token para flujo mobile (JSON)")
+
+class LogoutRequest(BaseModel):
+    refresh_token: Optional[str] = Field(None, description="Refresh token para revocación (mobile o fallback)")
+    # client_type no es obligatorio; si no viene se infiere en backend
+    client_type: Optional[str] = Field(None, description="'web' o 'mobile'")
+
+def _infer_client_type(user_agent: str | None) -> str:
+    ua = (user_agent or "").lower()
+    # Heurística segura: si no detectamos móvil, queda web (para no romper flujo actual).
+    mobile_markers = ["dart", "flutter", "okhttp", "cfnetwork", "alamofire", "android", "iphone", "ipad", "ios"]
+    return "mobile" if any(m in ua for m in mobile_markers) else "web"
+
+def _get_ip_address(request: Request) -> str:
+    # Respeta reverse proxies si existieran.
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else ""
 
 # ----------------------------------------------------------------------
 # --- Endpoint para Login ---
@@ -52,6 +78,7 @@ logger = get_logger(__name__)
 )
 async def login(
     response: Response,
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends()
 ):
     """
@@ -80,7 +107,20 @@ async def login(
 
         # 3) Tokens
         access_token = create_access_token(data={"sub": form_data.username})
-        refresh_token = create_refresh_token(data={"sub": form_data.username})
+        refresh_token, _jti, refresh_expires_at = create_refresh_token_with_meta(data={"sub": form_data.username})
+
+        # 3.1) Persistir refresh token (hash) en DB (multi-dispositivo)
+        client_type = _infer_client_type(request.headers.get("user-agent"))
+        ip_address = _get_ip_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        save_refresh_token(
+            usuario_id=int(user_base_data["usuario_id"]),
+            refresh_token=refresh_token,
+            expires_at=refresh_expires_at,
+            client_type=client_type,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
 
         # 4) Setear refresh en cookie HttpOnly con configuración dinámica
         response.set_cookie(
@@ -97,6 +137,7 @@ async def login(
 
         return {
             "access_token": access_token,
+            "refresh_token": refresh_token,
             "token_type": "bearer",
             "user_data": user_full_data
         }
@@ -232,7 +273,7 @@ async def get_my_roles(
 async def refresh_access_token(
     request: Request,
     response: Response,
-    current_user: dict = Depends(get_current_user_from_refresh)
+    body: RefreshRequest = None
 ):
     """
     Genera un nuevo Access Token y rota el Refresh Token.
@@ -248,40 +289,73 @@ async def refresh_access_token(
     Raises:
         HTTPException: Si el token es inválido (401) o error interno (500).
     """
-    # Logs para depuración (mantenidos del código original)
-    cookies = request.cookies
-    logger.info(f"🍪 [REFRESH] Cookies recibidas: {list(cookies.keys())}")
-    logger.info(f"🍪 [REFRESH] refresh_token presente: {'refresh_token' in cookies}")
-    if settings.REFRESH_COOKIE_NAME in cookies:
-        token_preview = cookies[settings.REFRESH_COOKIE_NAME][:30] if len(cookies[settings.REFRESH_COOKIE_NAME]) > 30 else cookies[settings.REFRESH_COOKIE_NAME]
-        logger.info(f"🍪 [REFRESH] refresh_token value (primeros 30 chars): {token_preview}...")
-    else:
-        logger.warning(f"⚠️ [REFRESH] NO SE RECIBIÓ COOKIE {settings.REFRESH_COOKIE_NAME}")
-    
-    logger.info(f"🔍 [REFRESH] Headers recibidos: {dict(request.headers)}")
+    # Soporte dual:
+    # - Web: cookie HttpOnly
+    # - Mobile: JSON body con refresh_token
+    body = body or RefreshRequest()
+    cookie_token = request.cookies.get(settings.REFRESH_COOKIE_NAME)
+    incoming_refresh_token = (body.refresh_token or "").strip() or (cookie_token or "").strip()
+    token_from_body = bool((body.refresh_token or "").strip())
 
     try:
-        username = current_user.get("nombre_usuario") # Asumiendo que el payload del refresh tiene "nombre_usuario" o "sub"
+        if not incoming_refresh_token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No refresh token provided")
+
+        # Validación JWT + BD (hash)
+        payload = validate_refresh_token(incoming_refresh_token)
+        username = payload.get("sub")
         if not username:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no válido en el refresh token")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
         # 1) Access
         new_access_token = create_access_token(data={"sub": username})
 
         # 2) Rotar refresh
-        new_refresh_token = create_refresh_token(data={"sub": username})
-        response.set_cookie(
-            key=settings.REFRESH_COOKIE_NAME,
-            value=new_refresh_token,
-            httponly=True,
-            secure=settings.COOKIE_SECURE,
-            samesite=settings.COOKIE_SAMESITE,
-            max_age=settings.REFRESH_COOKIE_MAX_AGE,
-            path="/",
+        # Revocar token anterior en BD
+        revoke_refresh_token(hash_token(incoming_refresh_token))
+
+        # Emitir y persistir nuevo refresh
+        new_refresh_token, _new_jti, new_refresh_expires_at = create_refresh_token_with_meta(data={"sub": username})
+
+        # Buscar usuario_id desde BD para registrar nuevo refresh
+        # Nota: refresh token válido implica usuario existente; recuperamos usuario_id para persistencia.
+        user_row = await get_current_user_from_refresh(refresh_token=incoming_refresh_token)  # reutiliza lookup de usuario
+        usuario_id = int(user_row["usuario_id"])
+        client_type = _infer_client_type(request.headers.get("user-agent"))
+        ip_address = _get_ip_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        save_refresh_token(
+            usuario_id=usuario_id,
+            refresh_token=new_refresh_token,
+            expires_at=new_refresh_expires_at,
+            client_type=client_type,
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
-        logger.info(f"✅ [REFRESH] Token refrescado exitosamente para usuario: {username}")
+
+        # Respuesta según origen
+        if not token_from_body:
+            # Web/cookie flow: setear cookie, no devolver refresh en body
+            response.set_cookie(
+                key=settings.REFRESH_COOKIE_NAME,
+                value=new_refresh_token,
+                httponly=True,
+                secure=settings.COOKIE_SECURE,
+                samesite=settings.COOKIE_SAMESITE,
+                max_age=settings.REFRESH_COOKIE_MAX_AGE,
+                path="/",
+            )
+            return {
+                "access_token": new_access_token,
+                "refresh_token": None,
+                "token_type": "bearer",
+                "user_data": None
+            }
+
+        # Mobile/body flow: devolver refresh token
         return {
             "access_token": new_access_token,
+            "refresh_token": new_refresh_token,
             "token_type": "bearer",
             "user_data": None
         }
@@ -308,7 +382,7 @@ async def refresh_access_token(
     - 200: Cookie eliminada exitosamente.
     """
 )
-async def logout(response: Response):
+async def logout(request: Request, response: Response, body: LogoutRequest = None):
     """
     Cierra la sesión eliminando la cookie del Refresh Token.
 
@@ -321,6 +395,19 @@ async def logout(response: Response):
     Raises:
         None (Esta operación es idempotente y no suele fallar con un código de error de cliente/servidor).
     """
+    body = body or LogoutRequest()
+    cookie_token = request.cookies.get(settings.REFRESH_COOKIE_NAME)
+    incoming_refresh_token = (body.refresh_token or "").strip() or (cookie_token or "").strip()
+
+    # Revocar si existe
+    if incoming_refresh_token:
+        try:
+            revoke_refresh_token(hash_token(incoming_refresh_token))
+        except Exception:
+            # Logout es idempotente: no exponemos detalles.
+            logger.warning("No se pudo revocar refresh token en logout", exc_info=True)
+
+    # Borrar cookie si existe (web)
     response.delete_cookie(
         key=settings.REFRESH_COOKIE_NAME,
         path="/",
